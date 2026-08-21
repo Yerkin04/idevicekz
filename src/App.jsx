@@ -158,7 +158,7 @@ export default function IDeviceApp() {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [settings, setSettings] = useState({ id: 1, password: null, currency: "₸" });
-  const [authed, setAuthed] = useState(false);
+  const [authed, setAuthed] = useState(() => localStorage.getItem("idevice_authed") === "true");
   const [passInput, setPassInput] = useState("");
   const [passInput2, setPassInput2] = useState("");
   const [showPass, setShowPass] = useState(false);
@@ -215,11 +215,13 @@ export default function IDeviceApp() {
         }
         setSettings(updated && updated[0] ? updated[0] : { ...settings, password: passInput });
         setAuthed(true);
+        localStorage.setItem("idevice_authed", "true");
       } catch (e) {
         setAuthError("Ошибка сохранения пароля: " + e.message);
       }
     } else if (passInput === settings.password) {
       setAuthed(true);
+      localStorage.setItem("idevice_authed", "true");
     } else {
       setAuthError("Неверный пароль");
     }
@@ -449,7 +451,7 @@ export default function IDeviceApp() {
             <div className="text-[11px]" style={{ color: "var(--muted)" }}>Панель основателя · Supabase</div>
           </div>
         </div>
-        <button onClick={() => setAuthed(false)} className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg" style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
+        <button onClick={() => { setAuthed(false); localStorage.removeItem("idevice_authed"); }} className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg" style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
           <LogOut size={13} /> Выйти
         </button>
       </div>
