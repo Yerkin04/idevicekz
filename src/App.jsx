@@ -13,11 +13,16 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://uooppxxlikptf
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_ZvcLhtS9FXSwUkPJoOlqnQ_eFy7y38I";
 
 async function sb(path, options = {}) {
+  // New sb_publishable_* keys belong in the apikey header. Authorization is
+  // reserved for a user JWT. Keep Bearer only for legacy JWT-based anon keys.
+  const authHeaders = SUPABASE_ANON_KEY.startsWith("eyJ")
+    ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+    : {};
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...options,
     headers: {
       apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      ...authHeaders,
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
