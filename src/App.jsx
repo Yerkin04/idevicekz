@@ -24,7 +24,16 @@ async function sb(path, options = {}) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Supabase ${res.status}: ${text || res.statusText}`);
+    let details = text || res.statusText;
+    try {
+      const payload = JSON.parse(text);
+      details = [payload.message, payload.details, payload.hint]
+        .filter(Boolean)
+        .join(" · ");
+    } catch {
+      // Supabase can also return a plain-text error.
+    }
+    throw new Error(`Supabase ${res.status}: ${details}`);
   }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -553,7 +562,10 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
   const [name, setName] = useState(""); const [sku, setSku] = useState("");
   const [batchProduct, setBatchProduct] = useState(""); const [batchQty, setBatchQty] = useState("");
   const [batchPrice, setBatchPrice] = useState(""); const [batchDate, setBatchDate] = useState(todayStr());
-  const [busy, setBusy] = useState(false);
+  const [productBusy, setProductBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [productMessage, setProductMessage] = useState(null);
+  const [batchMessage, setBatchMessage] = useState(null);
 
   useEffect(() => { if (!batchProduct && products.length) setBatchProduct(products[0].id); }, [products, batchProduct]);
 
@@ -565,10 +577,39 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
           <div className="flex flex-col gap-3">
             <Field label="Название (например AirPods Pro 2)"><TextInput value={name} onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Артикул / SKU (необязательно)"><TextInput value={sku} onChange={(e) => setSku(e.target.value)} /></Field>
-            <Btn disabled={busy} onClick={async () => {
-              if (!name.trim()) return; setBusy(true);
-              try { await addProduct(name.trim(), sku.trim()); setName(""); setSku(""); } finally { setBusy(false); }
-            }} className="self-start"><Plus size={14} /> Добавить модель</Btn>
+            {productMessage && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-1.5 text-xs"
+                style={{ color: productMessage.type === "success" ? "var(--green)" : "var(--red)" }}
+              >
+                {productMessage.type === "success" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                <span>{productMessage.text}</span>
+              </div>
+            )}
+            <Btn disabled={productBusy} onClick={async () => {
+              setProductMessage(null);
+              if (!name.trim()) {
+                setProductMessage({ type: "error", text: "Введите название модели." });
+                return;
+              }
+              setProductBusy(true);
+              try {
+                await addProduct(name.trim(), sku.trim());
+                setName("");
+                setSku("");
+                setProductMessage({ type: "success", text: "Модель добавлена на склад." });
+              } catch (error) {
+                console.error("Не удалось добавить модель:", error);
+                setProductMessage({
+                  type: "error",
+                  text: `Не удалось добавить модель: ${error?.message || "неизвестная ошибка"}`,
+                });
+              } finally {
+                setProductBusy(false);
+              }
+            }} className="self-start"><Plus size={14} /> {productBusy ? "Добавление…" : "Добавить модель"}</Btn>
           </div>
         </Card>
         <Card>
@@ -583,12 +624,52 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
                 <Field label={`Цена закупки за шт, ${cur}`}><TextInput type="number" min="0" value={batchPrice} onChange={(e) => setBatchPrice(e.target.value)} /></Field>
               </div>
               <Field label="Дата закупки"><TextInput type="date" value={batchDate} onChange={(e) => setBatchDate(e.target.value)} /></Field>
-              <Btn disabled={busy} onClick={async () => {
+              {batchMessage && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="flex items-start gap-1.5 text-xs"
+                  style={{ color: batchMessage.type === "success" ? "var(--green)" : "var(--red)" }}
+                >
+                  {batchMessage.type === "success" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                  <span>{batchMessage.text}</span>
+                </div>
+              )}
+              <Btn disabled={batchBusy} onClick={async () => {
+                setBatchMessage(null);
                 const qty = Number(batchQty), price = Number(batchPrice);
-                if (!batchProduct || qty <= 0 || price < 0) return;
-                setBusy(true);
-                try { await addBatch(batchProduct, qty, price, batchDate); setBatchQty(""); setBatchPrice(""); } finally { setBusy(false); }
-              }} className="self-start"><Plus size={14} /> Добавить партию</Btn>
+                if (!batchProduct) {
+                  setBatchMessage({ type: "error", text: "Выберите модель товара." });
+                  return;
+                }
+                if (!batchQty || !Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
+                  setBatchMessage({ type: "error", text: "Количество должно быть целым числом больше нуля." });
+                  return;
+                }
+                if (batchPrice === "" || !Number.isFinite(price) || price < 0) {
+                  setBatchMessage({ type: "error", text: "Укажите корректную цену закупки." });
+                  return;
+                }
+                if (!batchDate) {
+                  setBatchMessage({ type: "error", text: "Укажите дату закупки." });
+                  return;
+                }
+                setBatchBusy(true);
+                try {
+                  await addBatch(batchProduct, qty, price, batchDate);
+                  setBatchQty("");
+                  setBatchPrice("");
+                  setBatchMessage({ type: "success", text: "Партия добавлена на склад." });
+                } catch (error) {
+                  console.error("Не удалось добавить партию:", error);
+                  setBatchMessage({
+                    type: "error",
+                    text: `Не удалось добавить партию: ${error?.message || "неизвестная ошибка"}`,
+                  });
+                } finally {
+                  setBatchBusy(false);
+                }
+              }} className="self-start"><Plus size={14} /> {batchBusy ? "Добавление…" : "Добавить партию"}</Btn>
             </div>
           )}
         </Card>
