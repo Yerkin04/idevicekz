@@ -247,7 +247,7 @@ export default function IDeviceApp() {
     setBatches((prev) => prev.filter((b) => b.id !== id));
   };
 
-  const addSale = async (productId, qty, salePrice, date) => {
+  const addSale = async (productId, qty, salePrice, date, paymentMethod = "cash") => {
     const { cogsTotal, breakdown, changed, shortfall } = consumeFIFO(batches, productId, qty);
     if (shortfall > 0) {
       return { ok: false, error: `Недостаточно остатка: не хватает ${shortfall} шт. Сначала добавьте закупку на складе.` };
@@ -257,7 +257,7 @@ export default function IDeviceApp() {
       const [saleRow] = await sbInsert("sales", {
         product_id: productId, qty, sale_price: salePrice,
         revenue: qty * salePrice, cogs: cogsTotal, profit: qty * salePrice - cogsTotal,
-        breakdown, date,
+        breakdown, date, payment_method: paymentMethod,
       });
       setBatches((prev) => prev.map((b) => (changed[b.id] !== undefined ? { ...b, remaining_qty: changed[b.id] } : b)));
       setSales((prev) => [saleRow, ...prev]);
@@ -728,10 +728,13 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
 function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
   const [productId, setProductId] = useState(""); const [qty, setQty] = useState("1");
   const [price, setPrice] = useState(""); const [date, setDate] = useState(todayStr());
+  const [paymentMethod, setPaymentMethod] = useState("cash");
   const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
 
   useEffect(() => { if (!productId && products.length) setProductId(products[0].id); }, [products, productId]);
   const stockFor = (id) => inventory.find((p) => p.id === id)?.qty ?? 0;
+
+  const paymentLabels = { cash: "Наличные", card: "Карта", kaspi: "Kaspi", other: "Другое" };
 
   const submit = async () => {
     setError("");
@@ -739,7 +742,7 @@ function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
     if (!productId || q <= 0 || pr < 0) return;
     setBusy(true);
     try {
-      const res = await addSale(productId, q, pr, date);
+      const res = await addSale(productId, q, pr, date, paymentMethod);
       if (!res.ok) { setError(res.error); return; }
       setQty("1"); setPrice("");
     } finally { setBusy(false); }
@@ -757,6 +760,14 @@ function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
             <Field label="Кол-во"><TextInput type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} className="w-20" /></Field>
             <Field label={`Цена продажи, ${cur}`}><TextInput type="number" min="0" value={price} onChange={(e) => setPrice(e.target.value)} className="w-32" /></Field>
             <Field label="Дата"><TextInput type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+            <Field label="Оплата">
+              <SelectInput value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+                <option value="cash">Наличные</option>
+                <option value="card">Карта</option>
+                <option value="kaspi">Kaspi</option>
+                <option value="other">Другое</option>
+              </SelectInput>
+            </Field>
             <Btn disabled={busy} onClick={submit}><Plus size={14} /> Записать продажу</Btn>
           </div>
         )}
@@ -768,22 +779,46 @@ function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
           <div className="text-xs" style={{ color: "var(--muted)" }}>Продаж пока нет.</div>
         ) : (
           <div className="flex flex-col gap-1 text-sm">
-            <div className="grid grid-cols-[80px_1fr_50px_90px_90px_90px_30px] gap-2 text-[11px] uppercase tracking-wide pb-2" style={{ color: "var(--muted)" }}>
-              <span>Дата</span><span>Модель</span><span>Кол-во</span><span>Выручка</span><span>Себест.</span><span>Прибыль</span><span></span>
+            <div className="grid grid-cols-[1fr_50px_90px_90px_90px_80px_30px] gap-2 text-[11px] uppercase tracking-wide pb-2" style={{ color: "var(--muted)" }}>
+              <span>Модель</span><span>Кол-во</span><span>Выручка</span><span>Себест.</span><span>Прибыль</span><span>Оплата</span><span></span>
             </div>
-            {sales.map((s) => {
-              const pName = products.find((p) => p.id === s.product_id)?.name || "—";
-              return (
-                <div key={s.id} className="grid grid-cols-[80px_1fr_50px_90px_90px_90px_30px] gap-2 items-center py-1.5" style={{ borderTop: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
-                  <span style={{ color: "var(--muted)" }}>{s.date}</span>
-                  <span style={{ fontFamily: "var(--font-body)", color: "var(--text)" }}>{pName}</span>
-                  <span>{s.qty}</span><span>{fmtMoney(s.revenue, cur)}</span>
-                  <span style={{ color: "var(--muted)" }}>{fmtMoney(s.cogs, cur)}</span>
-                  <span style={{ color: s.profit >= 0 ? "var(--green)" : "var(--red)" }}>{fmtMoney(s.profit, cur)}</span>
-                  <button onClick={() => deleteSale(s.id)} style={{ color: "var(--muted)" }}><Trash2 size={12} /></button>
-                </div>
-              );
-            })}
+            {(() => {
+              const sorted = [...sales].sort((a, b) => b.date.localeCompare(a.date));
+              const groups = [];
+              sorted.forEach((s) => {
+                const last = groups[groups.length - 1];
+                if (last && last.date === s.date) last.items.push(s);
+                else groups.push({ date: s.date, items: [s] });
+              });
+              return groups.map((g) => {
+                const dayQty = g.items.reduce((sum, s) => sum + s.qty, 0);
+                const dayRevenue = g.items.reduce((sum, s) => sum + s.revenue, 0);
+                const dayProfit = g.items.reduce((sum, s) => sum + s.profit, 0);
+                return (
+                  <div key={g.date} className="mt-3 first:mt-0">
+                    <div className="flex items-center justify-between px-2 py-1.5 rounded-md mb-1" style={{ background: "rgba(255,255,255,0.05)" }}>
+                      <span className="text-xs font-medium" style={{ color: "var(--text)" }}>{g.date}</span>
+                      <span className="text-[11px]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+                        {dayQty} шт · выручка {fmtMoney(dayRevenue, cur)} · прибыль {fmtMoney(dayProfit, cur)}
+                      </span>
+                    </div>
+                    {g.items.map((s) => {
+                      const pName = products.find((p) => p.id === s.product_id)?.name || "—";
+                      return (
+                        <div key={s.id} className="grid grid-cols-[1fr_50px_90px_90px_90px_80px_30px] gap-2 items-center py-1.5" style={{ borderTop: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
+                          <span style={{ fontFamily: "var(--font-body)", color: "var(--text)" }}>{pName}</span>
+                          <span>{s.qty}</span><span>{fmtMoney(s.revenue, cur)}</span>
+                          <span style={{ color: "var(--muted)" }}>{fmtMoney(s.cogs, cur)}</span>
+                          <span style={{ color: s.profit >= 0 ? "var(--green)" : "var(--red)" }}>{fmtMoney(s.profit, cur)}</span>
+                          <span style={{ color: "var(--muted)", fontFamily: "var(--font-body)" }}>{paymentLabels[s.payment_method] || s.payment_method || "—"}</span>
+                          <button onClick={() => deleteSale(s.id)} style={{ color: "var(--muted)" }}><Trash2 size={12} /></button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
       </Card>
