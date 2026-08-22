@@ -734,7 +734,7 @@ function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
   useEffect(() => { if (!productId && products.length) setProductId(products[0].id); }, [products, productId]);
   const stockFor = (id) => inventory.find((p) => p.id === id)?.qty ?? 0;
 
-  const paymentLabels = { cash: "Наличные", card: "Карта", kaspi: "Kaspi", other: "Другое" };
+  const paymentLabels = { cash: "Наличные", kaspi_gold: "Kaspi Gold", kaspi_red: "Kaspi Red", installment: "Рассрочка", halyk: "Halyk" };
 
   const submit = async () => {
     setError("");
@@ -763,9 +763,10 @@ function SalesTab({ cur, products, sales, inventory, addSale, deleteSale }) {
             <Field label="Оплата">
               <SelectInput value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
                 <option value="cash">Наличные</option>
-                <option value="card">Карта</option>
-                <option value="kaspi">Kaspi</option>
-                <option value="other">Другое</option>
+                <option value="kaspi_gold">Kaspi Gold</option>
+                <option value="kaspi_red">Kaspi Red</option>
+                <option value="installment">Рассрочка</option>
+                <option value="halyk">Halyk</option>
               </SelectInput>
             </Field>
             <Btn disabled={busy} onClick={submit}><Plus size={14} /> Записать продажу</Btn>
