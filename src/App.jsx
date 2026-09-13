@@ -80,13 +80,63 @@ function consumeFIFO(batches, productId, qtyNeeded) {
 }
 
 // ---------- Геокодирование и расстояние (для раздела "Flip") ----------
-async function geocodeAddress(query) {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kz&q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, { headers: { "Accept-Language": "ru" } });
-  if (!res.ok) throw new Error("Сервис геокодирования недоступен");
-  const data = await res.json();
-  if (!data || data.length === 0) return null;
-  return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+function expandAbbreviations(s) {
+  return s
+    .replace(/\bмкрн?\.?\b/gi, "микрорайон")
+    .replace(/\bпр\.?\b/gi, "проспект")
+    .replace(/\bул\.?\b/gi, "улица")
+    .replace(/\bбул\.?\b/gi, "бульвар")
+    .replace(/\bд\.?\b/gi, "дом");
+}
+
+function buildAddressVariants(address, city) {
+  const cityPart = `${city}, Казахстан`;
+  const raw = address.trim();
+  const variants = [`${raw}, ${cityPart}`];
+
+  const expanded = expandAbbreviations(raw);
+  if (expanded !== raw) variants.push(`${expanded}, ${cityPart}`);
+
+  // без названия ТД/ТЦ/ЖК и пометок про вход
+  const stripped = raw.replace(/,?\s*(ТД|ТЦ|ЖК|вход)[^,]*/gi, "").trim();
+  if (stripped && stripped !== raw) {
+    variants.push(`${stripped}, ${cityPart}`);
+    const strippedExpanded = expandAbbreviations(stripped);
+    if (strippedExpanded !== stripped) variants.push(`${strippedExpanded}, ${cityPart}`);
+  }
+
+  // без "блок/корпус/к. N"
+  const base = stripped || raw;
+  const noBlock = base.replace(/,?\s*(блок|корпус|к\.)\s*\d+/gi, "").trim();
+  if (noBlock && noBlock !== base) {
+    variants.push(`${noBlock}, ${cityPart}`);
+    const noBlockExpanded = expandAbbreviations(noBlock);
+    if (noBlockExpanded !== noBlock) variants.push(`${noBlockExpanded}, ${cityPart}`);
+  }
+
+  // последняя попытка: только первый сегмент адреса (улица/микрорайон + номер)
+  const firstSeg = raw.split(",")[0].trim();
+  if (firstSeg && firstSeg !== raw) {
+    variants.push(`${firstSeg}, ${cityPart}`);
+    const firstSegExpanded = expandAbbreviations(firstSeg);
+    if (firstSegExpanded !== firstSeg) variants.push(`${firstSegExpanded}, ${cityPart}`);
+  }
+
+  return [...new Set(variants)];
+}
+
+async function geocodeAddress(address, city) {
+  const variants = buildAddressVariants(address, city);
+  for (let i = 0; i < variants.length; i++) {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kz&q=${encodeURIComponent(variants[i])}`;
+    const res = await fetch(url, { headers: { "Accept-Language": "ru" } });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.length > 0) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    }
+    if (i < variants.length - 1) await new Promise((r) => setTimeout(r, 1100));
+  }
+  return null;
 }
 
 function haversineKm(lat1, lng1, lat2, lng2) {
@@ -355,7 +405,7 @@ export default function IDeviceApp() {
 
   const [flipPoints, setFlipPoints] = useState([]);
   const addFlipPoint = async (city, address) => {
-    const coords = await geocodeAddress(`${address}, ${city}, Казахстан`);
+    const coords = await geocodeAddress(address, city);
     if (!coords) return { ok: false, error: "Не удалось определить координаты этого адреса. Проверьте написание адреса." };
     const [row] = await sbInsert("flip_points", { city: city.trim(), address: address.trim(), lat: coords.lat, lng: coords.lng });
     setFlipPoints((prev) => [row, ...prev]);
@@ -1154,7 +1204,7 @@ function FlipTab({ flipPoints, addFlipPoint, deleteFlipPoint }) {
     if (cityPoints.length === 0) { setSearchError(`Пока нет ни одного пункта Flip для города «${city.trim()}». Добавьте пункты ниже.`); return; }
     setSearching(true);
     try {
-      const coords = await geocodeAddress(`${address}, ${city}, Казахстан`);
+      const coords = await geocodeAddress(address, city);
       if (!coords) { setSearchError("Не удалось определить адрес клиента. Проверьте написание адреса."); return; }
       const withDist = cityPoints
         .map((p) => ({ ...p, distanceKm: haversineKm(coords.lat, coords.lng, p.lat, p.lng) }))
