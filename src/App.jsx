@@ -1142,6 +1142,11 @@ function FlipTab({ flipPoints, addFlipPoint, deleteFlipPoint }) {
   const [mBusy, setMBusy] = useState(false);
   const [mMessage, setMMessage] = useState(null);
 
+  const [bulkText, setBulkText] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
+  const [bulkResults, setBulkResults] = useState(null); // [{line, ok, error}]
+
   const search = async () => {
     setSearchError(""); setResults(null);
     if (!city.trim() || !address.trim()) { setSearchError("Укажите город и адрес клиента."); return; }
@@ -1173,6 +1178,41 @@ function FlipTab({ flipPoints, addFlipPoint, deleteFlipPoint }) {
       setMAddress("");
       setMMessage({ type: "success", text: "Пункт Flip добавлен." });
     } finally { setMBusy(false); }
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const submitBulk = async () => {
+    setBulkResults(null);
+    const lines = bulkText.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return;
+    const parsed = lines.map((line) => {
+      const parts = line.split(/[;,\t]/);
+      const lineCity = (parts[0] || "").trim();
+      const lineAddress = parts.slice(1).join(",").trim();
+      return { line, city: lineCity, address: lineAddress };
+    });
+    setBulkBusy(true);
+    setBulkProgress({ done: 0, total: parsed.length });
+    const results = [];
+    for (let i = 0; i < parsed.length; i++) {
+      const { line, city: c, address: a } = parsed[i];
+      if (!c || !a) {
+        results.push({ line, ok: false, error: "Не удалось разобрать строку (нужен формат: Город; Адрес)" });
+      } else {
+        try {
+          const res = await addFlipPoint(c, a);
+          results.push({ line, ok: res.ok, error: res.ok ? null : res.error });
+        } catch (e) {
+          results.push({ line, ok: false, error: e.message || "Ошибка" });
+        }
+      }
+      setBulkProgress({ done: i + 1, total: parsed.length });
+      if (i < parsed.length - 1) await sleep(1100); // не превышать лимит бесплатного геокодера (1 запрос/сек)
+    }
+    setBulkResults(results);
+    setBulkBusy(false);
+    if (results.every((r) => r.ok)) setBulkText("");
   };
 
   return (
@@ -1224,6 +1264,40 @@ function FlipTab({ flipPoints, addFlipPoint, deleteFlipPoint }) {
               </div>
             )}
             <Btn disabled={mBusy} onClick={submitManage} className="self-start"><Plus size={14} /> {mBusy ? "Добавление…" : "Добавить пункт"}</Btn>
+
+            <div className="pt-2" style={{ borderTop: "1px solid var(--border)" }}>
+              <div className="text-xs font-medium mb-2 mt-3">Массовое добавление</div>
+              <div className="text-[11px] mb-2" style={{ color: "var(--muted)" }}>
+                По одному пункту на строку, формат: <span style={{ fontFamily: "var(--font-mono)" }}>Город; Адрес</span>
+              </div>
+              <textarea
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                placeholder={"Алматы; ул. Достык 91\nАлматы; мкр. Самал-2, 111\nШымкент; ул. Кызылжар 12"}
+                rows={5}
+                className="w-full rounded-lg px-3 py-2 text-xs outline-none"
+                style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", fontFamily: "var(--font-mono)", resize: "vertical" }}
+              />
+              <div className="flex items-center gap-3 mt-2">
+                <Btn disabled={bulkBusy || !bulkText.trim()} onClick={submitBulk} className="self-start">
+                  <Plus size={14} /> {bulkBusy ? `Добавление ${bulkProgress?.done ?? 0}/${bulkProgress?.total ?? 0}…` : "Добавить все"}
+                </Btn>
+                {bulkBusy && <span className="text-[11px]" style={{ color: "var(--muted)" }}>~1 сек на пункт, не закрывайте страницу</span>}
+              </div>
+              {bulkResults && (
+                <div className="flex flex-col gap-1 mt-3">
+                  <div className="text-[11px] mb-1" style={{ color: "var(--muted)" }}>
+                    Готово: {bulkResults.filter((r) => r.ok).length} из {bulkResults.length}
+                  </div>
+                  {bulkResults.filter((r) => !r.ok).map((r, i) => (
+                    <div key={i} className="flex items-start gap-1.5 text-[11px]" style={{ color: "var(--red)" }}>
+                      <XCircle size={12} className="mt-0.5 flex-shrink-0" />
+                      <span>{r.line} — {r.error}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {flipPoints.length > 0 && (
               <div className="flex flex-col gap-1.5 mt-2">
