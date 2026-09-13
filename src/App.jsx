@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   LayoutDashboard, Package, ShoppingCart, Megaphone, Calculator, Settings as SettingsIcon,
   Plus, Trash2, LogOut, AlertTriangle, Lock, Eye, EyeOff, TrendingUp,
-  Wallet, Boxes, ArrowDownToLine, CheckCircle2, XCircle, RefreshCw
+  Wallet, Boxes, ArrowDownToLine, CheckCircle2, XCircle, RefreshCw, MapPin, Search
 } from "lucide-react";
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid
@@ -77,6 +77,27 @@ function consumeFIFO(batches, productId, qtyNeeded) {
     changed[b.id] = (changed[b.id] ?? b.remaining_qty) - take;
   }
   return { cogsTotal, breakdown, changed, shortfall: remaining };
+}
+
+// ---------- Геокодирование и расстояние (для раздела "Flip") ----------
+async function geocodeAddress(query) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kz&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, { headers: { "Accept-Language": "ru" } });
+  if (!res.ok) throw new Error("Сервис геокодирования недоступен");
+  const data = await res.json();
+  if (!data || data.length === 0) return null;
+  return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 // ---------- small UI atoms ----------
@@ -175,7 +196,7 @@ export default function IDeviceApp() {
   const loadAll = async () => {
     setLoadError("");
     try {
-      const [st, p, b, sl, ad, ex, wd] = await Promise.all([
+      const [st, p, b, sl, ad, ex, wd, wo, fp] = await Promise.all([
         sbSelect("app_settings", "select=*&id=eq.1"),
         sbSelect("products", "select=*&order=created_at.asc"),
         sbSelect("batches", "select=*&order=date.asc"),
@@ -183,6 +204,8 @@ export default function IDeviceApp() {
         sbSelect("ad_spend", "select=*&order=created_at.desc"),
         sbSelect("expenses", "select=*&order=created_at.desc"),
         sbSelect("withdrawals", "select=*&order=created_at.desc"),
+        sbSelect("write_offs", "select=*&order=created_at.desc"),
+        sbSelect("flip_points", "select=*&order=created_at.desc"),
       ]);
       setSettings(st && st[0] ? st[0] : { id: 1, password: null, currency: "₸" });
       setProducts(p || []);
@@ -191,6 +214,8 @@ export default function IDeviceApp() {
       setAdSpend(ad || []);
       setExpenses(ex || []);
       setWithdrawals(wd || []);
+      setWriteOffs(wo || []);
+      setFlipPoints(fp || []);
     } catch (e) {
       setLoadError(e.message || "Не удалось подключиться к Supabase");
     } finally {
@@ -280,6 +305,36 @@ export default function IDeviceApp() {
     setSales((prev) => prev.filter((s) => s.id !== id));
   };
 
+  const [writeOffs, setWriteOffs] = useState([]);
+  const addWriteOff = async (productId, qty, reason, date) => {
+    const { cogsTotal, breakdown, changed, shortfall } = consumeFIFO(batches, productId, qty);
+    if (shortfall > 0) {
+      return { ok: false, error: `Недостаточно остатка: не хватает ${shortfall} шт.` };
+    }
+    try {
+      await Promise.all(Object.entries(changed).map(([id, remaining_qty]) => sbUpdate("batches", id, { remaining_qty })));
+      const [row] = await sbInsert("write_offs", { product_id: productId, qty, cost: cogsTotal, breakdown, reason, date });
+      setBatches((prev) => prev.map((b) => (changed[b.id] !== undefined ? { ...b, remaining_qty: changed[b.id] } : b)));
+      setWriteOffs((prev) => [row, ...prev]);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: "Ошибка списания: " + e.message };
+    }
+  };
+  const deleteWriteOff = async (id) => {
+    const wo = writeOffs.find((w) => w.id === id);
+    if (!wo) return;
+    const restore = {};
+    for (const line of wo.breakdown || []) {
+      const b = batches.find((x) => x.id === line.batch_id);
+      if (b) restore[b.id] = (restore[b.id] ?? b.remaining_qty) + line.qty;
+    }
+    await Promise.all(Object.entries(restore).map(([bid, remaining_qty]) => sbUpdate("batches", bid, { remaining_qty })));
+    await sbDelete("write_offs", id);
+    setBatches((prev) => prev.map((b) => (restore[b.id] !== undefined ? { ...b, remaining_qty: restore[b.id] } : b)));
+    setWriteOffs((prev) => prev.filter((w) => w.id !== id));
+  };
+
   const addAdSpend = async (date, channel, amount, leads, ordersCount, note) => {
     const [row] = await sbInsert("ad_spend", { date, channel, amount, leads, orders_count: ordersCount, note });
     setAdSpend((prev) => [row, ...prev]);
@@ -297,6 +352,16 @@ export default function IDeviceApp() {
     setWithdrawals((prev) => [row, ...prev]);
   };
   const deleteWithdrawal = async (id) => { await sbDelete("withdrawals", id); setWithdrawals((prev) => prev.filter((w) => w.id !== id)); };
+
+  const [flipPoints, setFlipPoints] = useState([]);
+  const addFlipPoint = async (city, address) => {
+    const coords = await geocodeAddress(`${address}, ${city}, Казахстан`);
+    if (!coords) return { ok: false, error: "Не удалось определить координаты этого адреса. Проверьте написание адреса." };
+    const [row] = await sbInsert("flip_points", { city: city.trim(), address: address.trim(), lat: coords.lat, lng: coords.lng });
+    setFlipPoints((prev) => [row, ...prev]);
+    return { ok: true };
+  };
+  const deleteFlipPoint = async (id) => { await sbDelete("flip_points", id); setFlipPoints((prev) => prev.filter((f) => f.id !== id)); };
 
   const updateSettings = async (patch) => {
     let updated;
@@ -329,11 +394,12 @@ export default function IDeviceApp() {
     const ad = adSpend.reduce((s, x) => s + x.amount, 0);
     const exp = expenses.reduce((s, x) => s + x.amount, 0);
     const wd = withdrawals.reduce((s, x) => s + x.amount, 0);
+    const writeOffCost = writeOffs.reduce((s, x) => s + x.cost, 0);
     const grossProfit = revenue - cogs;
-    const netProfit = grossProfit - ad - exp;
+    const netProfit = grossProfit - ad - exp - writeOffCost;
     const available = netProfit - wd;
-    return { revenue, cogs, ad, exp, wd, grossProfit, netProfit, available };
-  }, [sales, adSpend, expenses, withdrawals]);
+    return { revenue, cogs, ad, exp, wd, writeOffCost, grossProfit, netProfit, available };
+  }, [sales, adSpend, expenses, withdrawals, writeOffs]);
 
   const today = todayStr();
   const todayAgg = useMemo(() => {
@@ -438,6 +504,7 @@ export default function IDeviceApp() {
     { id: "sales", label: "Продажи", icon: ShoppingCart },
     { id: "marketing", label: "Реклама и расходы", icon: Megaphone },
     { id: "cac", label: "CAC калькулятор", icon: Calculator },
+    { id: "flip", label: "Ближайший Flip", icon: MapPin },
     { id: "settings", label: "Настройки", icon: SettingsIcon },
   ];
 
@@ -473,7 +540,7 @@ export default function IDeviceApp() {
           totalStockQty={totalStockQty} totalStockValue={totalStockValue} lowStock={lowStock} outOfStock={outOfStock} chartData={chartData} />
       )}
       {tab === "inventory" && (
-        <InventoryTab cur={cur} products={products} inventory={inventory} addProduct={addProduct} deleteProduct={deleteProduct} addBatch={addBatch} deleteBatch={deleteBatch} />
+        <InventoryTab cur={cur} products={products} inventory={inventory} addProduct={addProduct} deleteProduct={deleteProduct} addBatch={addBatch} deleteBatch={deleteBatch} addWriteOff={addWriteOff} deleteWriteOff={deleteWriteOff} writeOffs={writeOffs} />
       )}
       {tab === "sales" && (
         <SalesTab cur={cur} products={products} sales={sales} inventory={inventory} addSale={addSale} deleteSale={deleteSale} />
@@ -484,6 +551,7 @@ export default function IDeviceApp() {
           addWithdrawal={addWithdrawal} deleteWithdrawal={deleteWithdrawal} available={totals.available} />
       )}
       {tab === "cac" && <CacTab cur={cur} avgCheck={avgCheck} avgCogsPerUnit={avgCogsPerUnit} adSpend={adSpend} />}
+      {tab === "flip" && <FlipTab flipPoints={flipPoints} addFlipPoint={addFlipPoint} deleteFlipPoint={deleteFlipPoint} />}
       {tab === "settings" && <SettingsTab settings={settings} updateSettings={updateSettings} resetAll={resetAll} />}
     </Root>
   );
@@ -545,6 +613,7 @@ function DashboardTab({ cur, totals, todayAgg, monthAgg, totalStockQty, totalSto
             <Row label="Валовая прибыль" value={fmtMoney(totals.grossProfit, cur)} bold />
             <Row label="Реклама" value={`− ${fmtMoney(totals.ad, cur)}`} />
             <Row label="Прочие расходы" value={`− ${fmtMoney(totals.exp, cur)}`} />
+            <Row label="Списано (брак)" value={`− ${fmtMoney(totals.writeOffCost, cur)}`} />
             <Row label="Чистая прибыль" value={fmtMoney(totals.netProfit, cur)} bold />
             <Row label="Уже выведено" value={`− ${fmtMoney(totals.wd, cur)}`} />
             <div className="h-px my-1" style={{ background: "var(--border)" }} />
@@ -565,7 +634,7 @@ function DashboardTab({ cur, totals, todayAgg, monthAgg, totalStockQty, totalSto
   );
 }
 
-function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, addBatch, deleteBatch }) {
+function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, addBatch, deleteBatch, addWriteOff, deleteWriteOff, writeOffs }) {
   const [name, setName] = useState(""); const [sku, setSku] = useState("");
   const [batchProduct, setBatchProduct] = useState(""); const [batchQty, setBatchQty] = useState("");
   const [batchPrice, setBatchPrice] = useState(""); const [batchDate, setBatchDate] = useState(todayStr());
@@ -574,11 +643,30 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
   const [productMessage, setProductMessage] = useState(null);
   const [batchMessage, setBatchMessage] = useState(null);
 
+  const [woProduct, setWoProduct] = useState(""); const [woQty, setWoQty] = useState("1");
+  const [woReason, setWoReason] = useState(""); const [woDate, setWoDate] = useState(todayStr());
+  const [woBusy, setWoBusy] = useState(false); const [woMessage, setWoMessage] = useState(null);
+
   useEffect(() => { if (!batchProduct && products.length) setBatchProduct(products[0].id); }, [products, batchProduct]);
+  useEffect(() => { if (!woProduct && products.length) setWoProduct(products[0].id); }, [products, woProduct]);
+
+  const submitWriteOff = async () => {
+    setWoMessage(null);
+    const qty = Number(woQty);
+    if (!woProduct) { setWoMessage({ type: "error", text: "Выберите модель товара." }); return; }
+    if (!qty || qty <= 0 || !Number.isInteger(qty)) { setWoMessage({ type: "error", text: "Количество должно быть целым числом больше нуля." }); return; }
+    setWoBusy(true);
+    try {
+      const res = await addWriteOff(woProduct, qty, woReason.trim() || "Брак", woDate);
+      if (!res.ok) { setWoMessage({ type: "error", text: res.error }); return; }
+      setWoQty("1"); setWoReason("");
+      setWoMessage({ type: "success", text: "Списано со склада." });
+    } finally { setWoBusy(false); }
+  };
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card>
           <div className="text-sm font-medium mb-3">Новая модель</div>
           <div className="flex flex-col gap-3">
@@ -680,6 +768,28 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
             </div>
           )}
         </Card>
+        <Card>
+          <div className="text-sm font-medium mb-3">Списать брак</div>
+          {products.length === 0 ? (
+            <div className="text-xs" style={{ color: "var(--muted)" }}>Сначала добавьте хотя бы одну модель товара.</div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <Field label="Модель"><SelectInput value={woProduct} onChange={(e) => setWoProduct(e.target.value)}>{products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</SelectInput></Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Кол-во, шт"><TextInput type="number" min="1" value={woQty} onChange={(e) => setWoQty(e.target.value)} /></Field>
+                <Field label="Дата"><TextInput type="date" value={woDate} onChange={(e) => setWoDate(e.target.value)} /></Field>
+              </div>
+              <Field label="Причина (необязательно)"><TextInput value={woReason} onChange={(e) => setWoReason(e.target.value)} placeholder="Брак, потеря, возврат поставщику…" /></Field>
+              {woMessage && (
+                <div role="status" aria-live="polite" className="flex items-start gap-1.5 text-xs" style={{ color: woMessage.type === "success" ? "var(--green)" : "var(--red)" }}>
+                  {woMessage.type === "success" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                  <span>{woMessage.text}</span>
+                </div>
+              )}
+              <Btn disabled={woBusy} variant="danger" onClick={submitWriteOff} className="self-start"><Trash2 size={14} /> {woBusy ? "Списание…" : "Списать со склада"}</Btn>
+            </div>
+          )}
+        </Card>
       </div>
 
       <div className="flex flex-col gap-4">
@@ -721,6 +831,26 @@ function InventoryTab({ cur, products, inventory, addProduct, deleteProduct, add
           );
         })}
       </div>
+
+      {writeOffs.length > 0 && (
+        <Card>
+          <div className="text-sm font-medium mb-3">История списаний (брак)</div>
+          <div className="flex flex-col gap-1.5">
+            {writeOffs.map((w) => {
+              const pName = products.find((p) => p.id === w.product_id)?.name || "—";
+              return (
+                <div key={w.id} className="flex items-center justify-between text-xs py-1" style={{ borderTop: "1px solid var(--border)", color: "var(--muted)" }}>
+                  <span>{w.date} · {pName} · {w.qty} шт · {w.reason}</span>
+                  <span className="flex items-center gap-2">
+                    <span style={{ color: "var(--red)" }}>−{fmtMoney(w.cost, cur)}</span>
+                    <button onClick={() => deleteWriteOff(w.id)} style={{ color: "var(--muted)" }}><Trash2 size={12} /></button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -995,6 +1125,119 @@ function CacTab({ cur, avgCheck, avgCogsPerUnit, adSpend }) {
           </Card>
         </div>
       )}
+    </div>
+  );
+}
+
+function FlipTab({ flipPoints, addFlipPoint, deleteFlipPoint }) {
+  const [city, setCity] = useState("");
+  const [address, setAddress] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [results, setResults] = useState(null);
+
+  const [showManage, setShowManage] = useState(false);
+  const [mCity, setMCity] = useState("");
+  const [mAddress, setMAddress] = useState("");
+  const [mBusy, setMBusy] = useState(false);
+  const [mMessage, setMMessage] = useState(null);
+
+  const search = async () => {
+    setSearchError(""); setResults(null);
+    if (!city.trim() || !address.trim()) { setSearchError("Укажите город и адрес клиента."); return; }
+    const cityPoints = flipPoints.filter((f) => f.city.trim().toLowerCase() === city.trim().toLowerCase());
+    if (cityPoints.length === 0) { setSearchError(`Пока нет ни одного пункта Flip для города «${city.trim()}». Добавьте пункты ниже.`); return; }
+    setSearching(true);
+    try {
+      const coords = await geocodeAddress(`${address}, ${city}, Казахстан`);
+      if (!coords) { setSearchError("Не удалось определить адрес клиента. Проверьте написание адреса."); return; }
+      const withDist = cityPoints
+        .map((p) => ({ ...p, distanceKm: haversineKm(coords.lat, coords.lng, p.lat, p.lng) }))
+        .sort((a, b) => a.distanceKm - b.distanceKm)
+        .slice(0, 5);
+      setResults(withDist);
+    } catch (e) {
+      setSearchError(e.message || "Ошибка поиска. Попробуйте ещё раз.");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const submitManage = async () => {
+    setMMessage(null);
+    if (!mCity.trim() || !mAddress.trim()) { setMMessage({ type: "error", text: "Укажите город и адрес пункта." }); return; }
+    setMBusy(true);
+    try {
+      const res = await addFlipPoint(mCity, mAddress);
+      if (!res.ok) { setMMessage({ type: "error", text: res.error }); return; }
+      setMAddress("");
+      setMMessage({ type: "success", text: "Пункт Flip добавлен." });
+    } finally { setMBusy(false); }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      <Card>
+        <div className="text-sm font-medium mb-3">Ближайший пункт Flip</div>
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field label="Город клиента"><TextInput value={city} onChange={(e) => setCity(e.target.value)} placeholder="Алматы" /></Field>
+            <Field label="Адрес клиента"><TextInput value={address} onChange={(e) => setAddress(e.target.value)} placeholder="ул. Абая 10" /></Field>
+          </div>
+          {searchError && (
+            <div className="flex items-start gap-1.5 text-xs" style={{ color: "var(--red)" }}>
+              <XCircle size={14} /><span>{searchError}</span>
+            </div>
+          )}
+          <Btn disabled={searching} onClick={search} className="self-start"><Search size={14} /> {searching ? "Ищем…" : "Найти"}</Btn>
+        </div>
+      </Card>
+
+      {results && results.length > 0 && (
+        <Card>
+          <div className="text-sm font-medium mb-3">Ближайшие пункты ({results.length})</div>
+          <div className="flex flex-col gap-1.5">
+            {results.map((p, i) => (
+              <div key={p.id} className="flex items-center justify-between text-sm py-2" style={{ borderTop: i > 0 ? "1px solid var(--border)" : "none" }}>
+                <span className="flex items-center gap-2"><MapPin size={14} style={{ color: "var(--brass)" }} />{p.address}</span>
+                <span className="mono" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>{p.distanceKm.toFixed(1)} км</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <button onClick={() => setShowManage((v) => !v)} className="text-xs font-medium flex items-center gap-1.5" style={{ color: "var(--muted)" }}>
+          {showManage ? "Скрыть" : "Управление пунктами Flip"}
+        </button>
+        {showManage && (
+          <div className="flex flex-col gap-4 mt-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+              <Field label="Город"><TextInput value={mCity} onChange={(e) => setMCity(e.target.value)} placeholder="Алматы" /></Field>
+              <Field label="Адрес пункта Flip"><TextInput value={mAddress} onChange={(e) => setMAddress(e.target.value)} placeholder="ул. Достык 91" /></Field>
+            </div>
+            {mMessage && (
+              <div className="flex items-start gap-1.5 text-xs" style={{ color: mMessage.type === "success" ? "var(--green)" : "var(--red)" }}>
+                {mMessage.type === "success" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                <span>{mMessage.text}</span>
+              </div>
+            )}
+            <Btn disabled={mBusy} onClick={submitManage} className="self-start"><Plus size={14} /> {mBusy ? "Добавление…" : "Добавить пункт"}</Btn>
+
+            {flipPoints.length > 0 && (
+              <div className="flex flex-col gap-1.5 mt-2">
+                {flipPoints.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between text-xs py-1.5" style={{ borderTop: "1px solid var(--border)", color: "var(--muted)" }}>
+                    <span>{p.city} · {p.address}</span>
+                    <button onClick={() => deleteFlipPoint(p.id)} style={{ color: "var(--muted)" }}><Trash2 size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
